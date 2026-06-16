@@ -1,0 +1,9 @@
+fastapi==0.110.0
+uvicorn==0.29.0
+pydantic==2.6.4
+playwright==1.42.0
+thefuzz==0.22.1
+SQLAlchemy==2.0.28
+requests==2.31.0
+Pillow==10.2.0
+XlsxWriter==3.2.0
