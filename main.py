@@ -281,7 +281,7 @@ def descargar_expedientes(datos: PeticionDescarga):
     
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=False)
+            browser = p.chromium.launch(headless=True)
             page = browser.new_page()
             for expediente in datos.expedientes:
                 try:
@@ -297,7 +297,7 @@ def descargar_expedientes(datos: PeticionDescarga):
                     ruta_final = f"{carpeta_destino}/Expediente_{expediente}.pdf"
                     download.save_as(ruta_final)
                     resultados_descarga.append({
-                        "expediente": expediente, "estado": "Exitoso", "url": f"http://127.0.0.1:8000/pdfs/Expediente_{expediente}.pdf"
+                        "expediente": expediente, "estado": "Exitoso", "url": f"https://impi-bot.onrender.com/pdfs/Expediente_{expediente}.pdf"
                     })
                     page.wait_for_timeout(3000)
                 except Exception:
