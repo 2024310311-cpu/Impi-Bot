@@ -14,6 +14,10 @@ from pydantic import BaseModel
 from playwright.sync_api import sync_playwright
 from thefuzz import fuzz
 from sqlalchemy.orm import Session
+import time
+import zipfile
+import glob
+import re
 
 import models
 from database import SessionLocal, engine
@@ -44,8 +48,12 @@ class PeticionBusqueda(BaseModel):
     denominacion: str
     clase: str
 
+class ItemDescarga(BaseModel):
+    expediente: str
+    denominacion: str
+
 class PeticionDescarga(BaseModel):
-    expedientes: list[str]
+    expedientes: list[ItemDescarga]
 
 class PeticionExcel(BaseModel):
     resultados: list[dict]
@@ -63,6 +71,22 @@ def limpiar_texto(texto):
     for char in ["+", "-", " ", ",", ".", "S.A.", "C.V."]:
         texto = texto.replace(char, "")
     return texto
+
+def limpiar_archivos_viejos(carpeta, horas=72):
+    ahora = time.time()
+    tiempo_limite = horas * 3600
+    for archivo in glob.glob(os.path.join(carpeta, '*')):
+        try:
+            if os.path.isfile(archivo):
+                if ahora - os.path.getmtime(archivo) > tiempo_limite:
+                    os.remove(archivo)
+        except Exception as e:
+            print(f"Error al limpiar {archivo}: {e}")
+
+def limpiar_nombre_archivo(nombre):
+    # Remueve caracteres inválidos para nombres de archivo
+    nombre = re.sub(r'[\\/*?:"<>|]', "", nombre)
+    return " ".join(nombre.split())
 
 @app.post("/api/buscar")
 def iniciar_busqueda(datos: PeticionBusqueda, db: Session = Depends(get_db)):
@@ -82,7 +106,13 @@ def iniciar_busqueda(datos: PeticionBusqueda, db: Session = Depends(get_db)):
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+            page = context.new_page()
+            
+            # Optimización: Bloquear descarga de imágenes, estilos y fuentes
+            page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "stylesheet", "font", "media"] else route.continue_())
             
             page.goto("https://acervomarcas.impi.gob.mx:8181/marcanet/vistas/common/datos/bsqFoneticaCompleta.pgi", timeout=90000)
             
@@ -277,13 +307,32 @@ def exportar_excel(datos: PeticionExcel):
 @app.post("/api/descargar")
 def descargar_expedientes(datos: PeticionDescarga):
     carpeta_destino = "descargas_oficiales"
+    
+    # Limpieza automática de archivos de más de 72 horas
+    limpiar_archivos_viejos(carpeta_destino, 72)
+    
     resultados_descarga = []
+    archivos_descargados = []
+    
+    timestamp = int(time.time())
+    nombre_zip = f"Expedientes_{timestamp}.zip"
+    ruta_zip = os.path.join(carpeta_destino, nombre_zip)
     
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            for expediente in datos.expedientes:
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                accept_downloads=True
+            )
+            page = context.new_page()
+            
+            # Optimización: Bloquear descarga de imágenes, estilos y fuentes para mayor velocidad
+            page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "stylesheet", "font", "media"] else route.continue_())
+            
+            for item in datos.expedientes:
+                expediente = item.expediente
+                denominacion_limpia = limpiar_nombre_archivo(item.denominacion)
                 try:
                     page.goto("https://acervomarcas.impi.gob.mx:8181/marcanet/vistas/common/datos/bsqExpedienteCompleto.pgi", timeout=90000)
                     page.locator("input[name*='expediente']").fill(expediente)
@@ -294,15 +343,35 @@ def descargar_expedientes(datos: PeticionDescarga):
                     with page.expect_download(timeout=30000) as download_info:
                         page.locator("a:has-text('Descargar datos de la consulta')").first.click()
                     download = download_info.value
-                    ruta_final = f"{carpeta_destino}/Expediente_{expediente}.pdf"
+                    
+                    nombre_pdf = f"{denominacion_limpia}_{expediente}.pdf"
+                    ruta_final = f"{carpeta_destino}/{nombre_pdf}"
                     download.save_as(ruta_final)
+                    
+                    import urllib.parse
+                    url_pdf = f"https://impi-bot.onrender.com/pdfs/{urllib.parse.quote(nombre_pdf)}"
+                    
                     resultados_descarga.append({
-                        "expediente": expediente, "estado": "Exitoso", "url": f"https://impi-bot.onrender.com/pdfs/Expediente_{expediente}.pdf"
+                        "expediente": expediente, "estado": "Exitoso", "url": url_pdf
                     })
+                    archivos_descargados.append(ruta_final)
                     page.wait_for_timeout(3000)
                 except Exception:
                     resultados_descarga.append({"expediente": expediente, "estado": "Error"})
             browser.close()
+            
+        url_zip = None
+        if archivos_descargados:
+            with zipfile.ZipFile(ruta_zip, 'w') as zipf:
+                for archivo in archivos_descargados:
+                    zipf.write(archivo, os.path.basename(archivo))
+            url_zip = f"https://impi-bot.onrender.com/pdfs/{nombre_zip}"
+
     except Exception:
         raise HTTPException(status_code=500, detail="Fallo general")
-    return {"mensaje": "Descarga finalizada", "detalles": resultados_descarga}
+        
+    return {
+        "mensaje": "Descarga finalizada", 
+        "detalles": resultados_descarga,
+        "zip_url": url_zip
+    }
